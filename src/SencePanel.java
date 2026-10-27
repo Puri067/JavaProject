@@ -5,6 +5,9 @@ import java.awt.event.ActionListener;
 import java.awt.event.ComponentAdapter;
 import java.awt.event.ComponentEvent;
 import java.io.IOException;
+import java.util.Arrays;
+import java.util.List;
+
 import javax.swing.*;
 
 // ตัวสลับหน้าจอทั้งเกม (หน้าหลัก / Lobby / Join Room / หน้าเล่นเกม) และเป็นตัวรับข้อความจาก Server
@@ -41,7 +44,7 @@ public class SencePanel extends JPanel implements ActionListener, GameClient.Lis
     // ระบบเครือข่าย
     private GameServer server;   // มีเฉพาะเครื่อง Host
     private GameClient client;   // ทุกเครื่องมี (Host ก็ต่อเข้า Server ตัวเอง)
-    private String roomIp = "";  // IP ห้องที่แสดงใน Lobby
+    private List<String> roomIp;  // IP ห้องที่แสดงใน Lobby
 
     //Constructor
 public SencePanel(JFrame frame) {
@@ -181,7 +184,7 @@ public SencePanel(JFrame frame) {
             server = new GameServer();
             server.start();
             client = new GameClient("127.0.0.1", GameServer.PORT, this);
-            roomIp = GameServer.getLocalIp();
+            roomIp = GameServer.getLocalIps();
             lobbyStatusLabel.setText("<html><center>Room ID (IP): " + roomIp + "<br>กำลังรอผู้เล่น...</center></html>");
             showPanel("lobbyPanel");
         } catch (IOException ex) {
@@ -192,10 +195,10 @@ public SencePanel(JFrame frame) {
     
     // กด Join Room: ต่อเข้า Server ตาม IP ที่กรอก
     private void joinRoom() {
-        String ip = ipField.getText().trim();
+        List<String> ip = Arrays.asList(ipField.getText().trim().split(","));
         if (ip.isEmpty()) return;
         try {
-            client = new GameClient(ip, GameServer.PORT, this);
+            client = new GameClient(ip.get(0), GameServer.PORT, this);
             roomIp = ip;
             lobbyStatusLabel.setText("กำลังเข้าห้อง...");
             showPanel("lobbyPanel");

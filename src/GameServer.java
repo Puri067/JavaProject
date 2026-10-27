@@ -3,6 +3,8 @@ package src;
 import java.io.*;
 import java.net.*;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
 
@@ -167,22 +169,23 @@ public class GameServer {
         }
     }
 
-    // หา IP ของเครื่องนี้ ไว้บอกเพื่อนให้กรอกตอน Join
-    // ลำดับความสำคัญ: 1) IP ของ Radmin VPN (26.x.x.x)  2) IP LAN ในบ้าน  3) 127.0.0.1
-    public static String getLocalIp() {
-        String lanIp = null; // IP LAN ธรรมดา เก็บไว้ใช้สำรองถ้าไม่เจอ Radmin VPN
+    /// คืนรายการ IP แบบ IPv4 ทุกตัวของเครื่อง (WiFi / LAN / VPN) ไม่ต้องเดาว่าเครื่องไหนใช้การ์ดอะไร
+    public static List<String> getLocalIps() {
+        List<String> ips = new ArrayList<>();                      // รายการเก็บ IP ที่หาเจอ
         try {
-            for (NetworkInterface ni : java.util.Collections.list(NetworkInterface.getNetworkInterfaces())) {
-                // ข้าม adapter ที่ปิดอยู่ และ loopback (ไม่ข้าม virtual เพราะ Radmin VPN เป็น adapter เสมือน)
-                if (!ni.isUp() || ni.isLoopback()) continue;
-                for (InetAddress addr : java.util.Collections.list(ni.getInetAddresses())) {
-                    if (!(addr instanceof Inet4Address)) continue; // ใช้เฉพาะ IPv4
-                    String ip = addr.getHostAddress();
-                    if (ip.startsWith("26.")) return ip; // เจอ IP ของ Radmin VPN ใช้ทันที เพื่อนต่อผ่าน VPN ได้
-                    if (lanIp == null && addr.isSiteLocalAddress()) lanIp = ip; // จำ IP LAN ตัวแรกไว้
+            // วนดูการ์ดเครือข่ายทุกใบในเครื่อง
+            for (NetworkInterface nic : Collections.list(NetworkInterface.getNetworkInterfaces())) {
+                if (!nic.isUp() || nic.isLoopback()) continue;     // ข้ามการ์ดที่ปิดอยู่ และ loopback (127.0.0.1)
+                for (InetAddress addr : Collections.list(nic.getInetAddresses())) { // วน IP ทุกตัวของการ์ดนั้น
+                    if (addr instanceof Inet4Address) {            // เอาเฉพาะ IPv4 (instanceof = เช็คชนิดของ object)
+                        ips.add(addr.getHostAddress());            // เก็บ IP เป็นข้อความ
+                    }
                 }
             }
-        } catch (SocketException ignored) {}
-        return lanIp != null ? lanIp : "127.0.0.1"; // ไม่เจอ Radmin ใช้ LAN แทน ถ้าไม่มีเลยใช้เครื่องตัวเอง
+        } catch (SocketException e) {
+            // อ่านรายการการ์ดไม่ได้ ก็ปล่อยให้ลิสต์ว่างไว้
+        }
+        if (ips.isEmpty()) ips.add("127.0.0.1");                   // ไม่เจอเลย ใช้เครื่องตัวเอง (เล่นคนเดียวทดสอบ)
+        return ips;                                                // ส่งรายการ IP กลับไป
     }
 }
