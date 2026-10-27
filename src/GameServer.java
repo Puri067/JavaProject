@@ -1,0 +1,188 @@
+package src;
+
+import java.io.*;
+import java.net.*;
+import java.nio.charset.StandardCharsets;
+import java.util.List;
+import java.util.concurrent.CopyOnWriteArrayList;
+
+/**
+ * Server ของเกม (รันบนเครื่องของคนที่กด Create)
+ * - รับผู้เล่นได้สูงสุด 4 คน คนแรกที่ต่อเข้ามา = หัวห้อง (Host) มีสิทธิ์กด Start
+ * - ถือ GameLogic ตัวจริง อัปเดตเกมทุก tick แล้วส่งสถานะไปทุก Client
+ *
+ * โปรโตคอล (ข้อความ 1 บรรทัด คั่นด้วย |)
+ *   Server -> Client : LOBBY|จำนวนคน|isHost, START|เลขผู้เล่นของเรา, STATE|..., RESULT|true/false, GAMEOVER|winner, FULL
+ *   Client -> Server : START, ANSWER|ตัวเลข
+ */
+public class GameServer {
+
+    public static final int PORT = 5000;
+    public static final int MAX_PLAYERS = 4;
+
+    private ServerSocket serverSocket;
+    private final List<ClientHandler> clients = new CopyOnWriteArrayList<>(); // ผู้เล่นที่ต่ออยู่ (ลำดับ = ลำดับเข้าห้อง)
+    private volatile GamePlayPanel.GameLogic logic;  // null = ยังอยู่ใน Lobby
+    private volatile boolean running = false;
+
+    // เปิด Server และเริ่มรอผู้เล่นเชื่อมต่อ
+    public void start() throws IOException {
+        serverSocket = new ServerSocket(PORT);
+        running = true;
+        Thread t = new Thread(this::acceptLoop, "Server-accept");
+        t.setDaemon(true);
+        t.start();
+    }
+
+    // ปิด Server และตัดการเชื่อมต่อทุกคน
+    public void stop() {
+        running = false;
+        try { if (serverSocket != null) serverSocket.close(); } catch (IOException ignored) {}
+        for (ClientHandler c : clients) c.close();
+        clients.clear();
+    }
+
+    // รอรับผู้เล่นใหม่ไปเรื่อย ๆ
+    private void acceptLoop() {
+        while (running) {
+            try {
+                Socket socket = serverSocket.accept();
+                ClientHandler handler = new ClientHandler(socket);
+                synchronized (this) {
+                    if (logic != null || clients.size() >= MAX_PLAYERS) { // ห้องเต็มหรือเกมเริ่มแล้ว
+                        handler.send("FULL");
+                        handler.close();
+                        continue;
+                    }
+                    clients.add(handler);
+                }
+                handler.start();
+                broadcastLobby();
+            } catch (IOException e) {
+                if (running) e.printStackTrace(); // ถ้าปิด Server เองจะเกิด exception ตรงนี้ ไม่ต้องสนใจ
+            }
+        }
+    }
+
+    // แจ้งจำนวนคนในห้องให้ทุกคน (คนแรกในลิสต์ = Host)
+    private void broadcastLobby() {
+        for (int i = 0; i < clients.size(); i++) {
+            clients.get(i).send("LOBBY|" + clients.size() + "|" + (i == 0));
+        }
+    }
+
+    private void broadcast(String msg) {
+        for (ClientHandler c : clients) c.send(msg);
+    }
+
+    // Host กด Start: กำหนดเลขผู้เล่นตามลำดับ แล้วเริ่ม Game Loop
+    private synchronized void startGame(ClientHandler from) {
+        if (logic != null || clients.isEmpty() || clients.get(0) != from) return; // เริ่มได้ครั้งเดียว และเฉพาะ Host
+        for (int i = 0; i < clients.size(); i++) {
+            clients.get(i).playerIdx = i;
+            clients.get(i).send("START|" + i);
+        }
+        logic = new GamePlayPanel.GameLogic(clients.size());
+        Thread t = new Thread(this::gameLoop, "Server-gameLoop");
+        t.setDaemon(true);
+        t.start();
+    }
+
+    // อัปเดตเกมทุก TICK_MS แล้วส่งสถานะให้ทุกคน จนกว่าเกมจะจบ
+    private void gameLoop() {
+        while (running) {
+            logic.update();
+            broadcast(logic.getStateString()); // ถ้าเกมจบ ข้อความนี้จะเป็น GAMEOVER
+            if (logic.isGameOver()) break;
+            try {
+                Thread.sleep(GamePlayPanel.GameLogic.TICK_MS);
+            } catch (InterruptedException e) {
+                return;
+            }
+        }
+    }
+
+    /** ดูแลผู้เล่น 1 คน: อ่านข้อความจาก Client ใน thread ของตัวเอง */
+    private class ClientHandler extends Thread {
+        private final Socket socket;
+        private final PrintWriter out;
+        private final BufferedReader in;
+        private volatile int playerIdx = -1; // เลขผู้เล่น (กำหนดตอนเริ่มเกม)
+
+        ClientHandler(Socket socket) throws IOException {
+            this.socket = socket;
+            out = new PrintWriter(new OutputStreamWriter(socket.getOutputStream(), StandardCharsets.UTF_8), true);
+            in = new BufferedReader(new InputStreamReader(socket.getInputStream(), StandardCharsets.UTF_8));
+            setDaemon(true);
+        }
+
+        @Override
+        public void run() {
+            try {
+                String line;
+                while ((line = in.readLine()) != null) {
+                    handle(line);
+                }
+            } catch (IOException ignored) {
+                // หลุดการเชื่อมต่อ
+            }
+            onDisconnect();
+        }
+
+        // จัดการคำสั่งจาก Client
+        private void handle(String line) {
+            String[] p = line.split("\\|");
+            if (p[0].equals("START")) {
+                startGame(this);
+            } else if (p[0].equals("ANSWER") && p.length > 1 && logic != null && playerIdx >= 0) {
+                try {
+                    boolean correct = logic.checkAnswer(playerIdx, Integer.parseInt(p[1].trim()));
+                    send("RESULT|" + correct);
+                    broadcast(logic.getStateString()); // ส่งสถานะใหม่ทันที ไม่ต้องรอ tick
+                } catch (NumberFormatException ignored) {
+                    // ไม่ใช่ตัวเลข ไม่สนใจ
+                }
+            }
+        }
+
+        // ผู้เล่นออก: ถ้าอยู่ Lobby อัปเดตจำนวนคน, ถ้าอยู่ในเกมให้ถือว่าตกรอบ
+        private void onDisconnect() {
+            clients.remove(this);
+            close();
+            if (!running) return;
+            if (logic == null) {
+                broadcastLobby();
+            } else {
+                logic.removePlayer(playerIdx);
+                broadcast(logic.getStateString());
+            }
+        }
+
+        synchronized void send(String msg) {
+            out.println(msg);
+        }
+
+        void close() {
+            try { socket.close(); } catch (IOException ignored) {}
+        }
+    }
+
+    // หา IP ของเครื่องนี้ ไว้บอกเพื่อนให้กรอกตอน Join
+    // ลำดับความสำคัญ: 1) IP ของ Radmin VPN (26.x.x.x)  2) IP LAN ในบ้าน  3) 127.0.0.1
+    public static String getLocalIp() {
+        String lanIp = null; // IP LAN ธรรมดา เก็บไว้ใช้สำรองถ้าไม่เจอ Radmin VPN
+        try {
+            for (NetworkInterface ni : java.util.Collections.list(NetworkInterface.getNetworkInterfaces())) {
+                // ข้าม adapter ที่ปิดอยู่ และ loopback (ไม่ข้าม virtual เพราะ Radmin VPN เป็น adapter เสมือน)
+                if (!ni.isUp() || ni.isLoopback()) continue;
+                for (InetAddress addr : java.util.Collections.list(ni.getInetAddresses())) {
+                    if (!(addr instanceof Inet4Address)) continue; // ใช้เฉพาะ IPv4
+                    String ip = addr.getHostAddress();
+                    if (ip.startsWith("26.")) return ip; // เจอ IP ของ Radmin VPN ใช้ทันที เพื่อนต่อผ่าน VPN ได้
+                    if (lanIp == null && addr.isSiteLocalAddress()) lanIp = ip; // จำ IP LAN ตัวแรกไว้
+                }
+            }
+        } catch (SocketException ignored) {}
+        return lanIp != null ? lanIp : "127.0.0.1"; // ไม่เจอ Radmin ใช้ LAN แทน ถ้าไม่มีเลยใช้เครื่องตัวเอง
+    }
+}
