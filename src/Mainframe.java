@@ -16,7 +16,7 @@ public class Mainframe extends JFrame {
     public static void main(String[] args) {
         Mainframe frame = new Mainframe();
         SencePanel panel = new SencePanel(frame);
-        frame.add(panel);
+        frame.add(panel);   
         frame.setVisible(true);
     }
 
